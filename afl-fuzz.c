@@ -3,6 +3,8 @@
    --------------------------------
 
    Written and maintained by Michal Zalewski <lcamtuf@google.com>
+   rewritten by afoolishboi
+   add gw-fuzz
 
    Forkserver design by Jann Horn <jannhorn@googlemail.com>
 
@@ -78,33 +80,29 @@
 #endif /* ^AFL_LIB */
 
 
-/*Global variable for FA-AFL-fuzzing*/
-int local_best_firefly_mode = 0;
+// global variable for GW_FUZZ
+int local_best_greywolf_mode = 0;
 int fuzzing_mode = 0;
-double initial_beta = 1.00;
-double initial_gama = 0.000001;
-double initial_alpha = 1.00;
-double alpha_value = 1.00;
-#define ROUND_MAX 5
-#define firefly_num 5
+int now_iter;
+int MaxIter;
+
+#define RAND_C ((double)rand() / RAND_MAX)
+#define ROUND_MAX 50
+#define greywolf_num 8
 #define operator_num 18
 #define x_max 1
 #define x_min 0.05
+double distance[operator_num];
+double A_value[operator_num];
 
-#define RAND_C (rand()/RAND_MAX+1)
-#define STAGE_RANDOMBYTE 12
-#define STAGE_DELETEBYTE 13
-#define STAGE_Clone75 14
-#define STAGE_OverWrite75 15
+u64 operator_greywolf_cycle_bkup[operator_num];
+u64 operator_greywolf_cycle[operator_num];
+u64 operator_greywolf_find[operator_num];
+u64 operator_greywolf_find_bkup[operator_num];
 
-u64 operator_firefly_cycle_bkup[operator_num];
-u64 operator_firefly_cycle[operator_num];
-u64 operator_firefly_find[operator_num];
-u64 operator_firefly_find_bkup[operator_num];
-
-u64 total_firefly_found;
-u64 total_firefly_found_bkup;
-u64 fa_total_testcase_num;
+u64 total_greywolf_found;
+u64 total_greywolf_found_bkup;
+u64 gw_total_testcase_num;
 
 
 /* Lots of globals, but mostly for the status UI and other things where it
@@ -279,11 +277,11 @@ struct queue_entry {
   u8* trace_mini;                     /* Trace bytes, if kept             */
   u32 tc_ref;                         /* Trace bytes ref count            */
 
-  u8 find_best_firefly;
+  u8 find_best_greywolf;
 
-  double x_now[firefly_num][operator_num];
-  double prob_now[firefly_num][operator_num];
-  double firefly_fitness[firefly_num];
+  double x_now[greywolf_num][operator_num];
+  double prob_now[greywolf_num][operator_num];
+  double greywolf_fitness[greywolf_num];
 
 
   struct queue_entry *next,           /* Next element, if any             */
@@ -360,7 +358,7 @@ enum {
   /* 05 */ FAULT_NOBITS
 };
 
-int select_algorithm(int tmp_firefly, int extra_cnt) {
+int select_algorithm(int tmp_greywolf, int extra_cnt) {
 
 	int i, j;
 
@@ -371,7 +369,7 @@ int select_algorithm(int tmp_firefly, int extra_cnt) {
 	srandom(seed[0]);
   int operator_number = operator_num;
   if (extra_cnt < 2) operator_number = operator_number - 2;
-  double range_sele = queue_cur->prob_now[tmp_firefly][operator_number-1];
+  double range_sele = queue_cur->prob_now[tmp_greywolf][operator_number-1];
 	double sele = ((double)(random() % 10000) * 0.0001 * range_sele);
 	//SAYF("select : %f\n",sele);
 	j = 0;
@@ -379,19 +377,19 @@ int select_algorithm(int tmp_firefly, int extra_cnt) {
 	{
 		if (unlikely(i == 0))
 		{
-			if (sele < queue_cur->prob_now[tmp_firefly][i])
+			if (sele < queue_cur->prob_now[tmp_greywolf][i])
 				break;
 		}
 		else
 		{
-			if (sele < queue_cur->prob_now[tmp_firefly][i])
+			if (sele < queue_cur->prob_now[tmp_greywolf][i])
 			{
 				j = 1;
 				break;
 			}
 		}
 	}
-	if ((j == 1 && sele < queue_cur->prob_now[tmp_firefly][i - 1]) || (i + 1 < operator_num && sele > queue_cur->prob_now[tmp_firefly][i+1]))
+	if ((j == 1 && sele < queue_cur->prob_now[tmp_greywolf][i - 1]) || (i + 1 < operator_num && sele > queue_cur->prob_now[tmp_greywolf][i+1]))
 		FATAL("error select_algorithm");
 	return i;
 }
@@ -2360,7 +2358,7 @@ static u8 run_target(char** argv, u32 timeout) {
 
     child_pid = fork();
 
-    if (child_pid < 0) PFATAL("fork() failed");
+    if (child_pid < 0) PFATAL("fork() failed", NULL);
 
     if (!child_pid) {
 
@@ -4084,7 +4082,7 @@ static void show_stats(void) {
   memset(tmp, ' ', banner_pad);
 
   if (fuzzing_mode == 1) {
-	  if (local_best_firefly_mode) {
+	  if (local_best_greywolf_mode) {
 		  sprintf(tmp + banner_pad, "%s " cLCY VERSION cLGN
 			  " (%s)", crash_mode ? cPIN "peruvian were-rabbit" :
 			  cYEL "FA-AFL + local best firefly", use_banner);
@@ -6185,11 +6183,11 @@ abandon_entry:
 }
 
 
-static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
+static u8 gwo_havoc_fuzzing_one(int tmp_greywolf, char** argv) {
 	s32 len, fd, temp_len, i;
 	u8* in_buf, * out_buf, * orig_in, * eff_map = 0;
 	u64 havoc_queued, orig_hit_cnt, new_hit_cnt, cur_ms_lv;
-	u64 fa_havoc_testcase_num = 0;
+	u64 gw_havoc_testcase_num = 0;
 	u32 splice_cycle = 0, perf_score = 100, orig_perf;
 
 	u8  ret_val = 1, doing_det = 0;
@@ -6283,7 +6281,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 		if (stop_soon || res != crash_mode) {
 			cur_skipped_paths++;
-			goto fa_abandon_entry;
+			goto gw_abandon_entry;
 		}
 
 	}
@@ -6301,7 +6299,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 		if (stop_soon) {
 			cur_skipped_paths++;
-			goto fa_abandon_entry;
+			goto gw_abandon_entry;
 		}
 
 		/* Don't retry trimming, even if it failed. */
@@ -6341,8 +6339,8 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 		if (!splice_cycle) {
 
-			stage_name = "FA-havoc";
-			stage_short = "FA-havoc";
+			stage_name = "GW-havoc";
+			stage_short = "GW-havoc";
 			stage_max = (doing_det ? HAVOC_CYCLES_INIT : HAVOC_CYCLES) *
 				perf_score / havoc_div / 100;
 
@@ -6353,9 +6351,9 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 			perf_score = orig_perf;
 
-			sprintf(tmp, "FA-splice-%u", splice_cycle);
+			sprintf(tmp, "GW-splice-%u", splice_cycle);
 			stage_name = tmp;
-			stage_short = "FA-splice";
+			stage_short = "GW-splice";
 			stage_max = SPLICE_HAVOC * perf_score / havoc_div / 100;
 
 		}
@@ -6365,7 +6363,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 		cur_ms_lv = get_cur_time();
 
 		{
-		fa_havoc_stage_entry:
+		gw_havoc_stage_entry:
 
 			stage_cur_byte = -1;
 
@@ -6374,8 +6372,8 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 			if (!splice_cycle) {
 
-				stage_name = "FA-havoc";
-				stage_short = "FA-havoc";
+				stage_name = "GW-havoc";
+				stage_short = "GW-havoc";
 				stage_max = (doing_det ? HAVOC_CYCLES_INIT : HAVOC_CYCLES) *
 					perf_score / havoc_div / 100;
 
@@ -6384,9 +6382,9 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 				static u8 tmp[32];
 				perf_score = orig_perf;
-				sprintf(tmp, "FA-splice-%u", splice_cycle);
+				sprintf(tmp, "GW-splice-%u", splice_cycle);
 				stage_name = tmp;
-				stage_short = "FA-splice";
+				stage_short = "GW-splice";
 				stage_max = SPLICE_HAVOC * perf_score / havoc_div / 100;
 
 			}
@@ -6411,13 +6409,13 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 				for (i = 0; i < operator_num; i++)
 				{
-					operator_firefly_cycle_bkup[i] = operator_firefly_cycle[i];
+					operator_greywolf_cycle_bkup[i] = operator_greywolf_cycle[i];
 				}
 
 
 				for (i = 0; i < use_stacking; i++) {
 
-					switch (select_algorithm(tmp_firefly, extras_cnt + a_extras_cnt)) {
+					switch (select_algorithm(tmp_greywolf, extras_cnt + a_extras_cnt)) {
 
 					case 0:
 
@@ -6779,12 +6777,12 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 					
 				}
 
-				fa_havoc_testcase_num += 1;
+				gw_havoc_testcase_num += 1;
 
-				u64 temp_firefly_found = queued_paths + unique_crashes;
+				u64 temp_greywolf_found = queued_paths + unique_crashes;
 
 				if (common_fuzz_stuff(argv, out_buf, temp_len))
-					goto fa_abandon_entry;
+					goto gw_abandon_entry;
 
 				/* out_buf might have been mangled a bit, so let's restore it to its
 					original size and shape. */
@@ -6807,13 +6805,13 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 				}
 
-				if (unlikely(queued_paths + unique_crashes > temp_firefly_found))
+				if (unlikely(queued_paths + unique_crashes > temp_greywolf_found))
 				{
-					total_firefly_found = total_firefly_found + queued_paths + unique_crashes - temp_firefly_found;
+					total_greywolf_found = total_greywolf_found + queued_paths + unique_crashes - temp_greywolf_found;
 
-					for (i = 0; i < firefly_num; i++) {
-						if (operator_firefly_cycle[i] > operator_firefly_cycle_bkup[i]) {
-							operator_firefly_find[i] = operator_firefly_find[i] + queued_paths + unique_crashes - temp_firefly_found;
+					for (i = 0; i < operator_num; i++) {
+						if (operator_greywolf_cycle[i] > operator_greywolf_cycle_bkup[i]) {
+							operator_greywolf_find[i] = operator_greywolf_find[i] + queued_paths + unique_crashes - temp_greywolf_found;
 						}
 					}
 				}
@@ -6834,7 +6832,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 			************/
 
 
-		retry_fa_splicing:
+		retry_gw_splicing:
 
 			if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
 				queued_paths > 1 && queue_cur->len > 1) {
@@ -6870,7 +6868,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 					splicing_with++;
 				}
 
-				if (!target) goto retry_fa_splicing;
+				if (!target) goto retry_gw_splicing;
 
 				/* Read the testcase into a new buffer. */
 
@@ -6892,7 +6890,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 				if (f_diff < 0 || l_diff < 2 || f_diff == l_diff) {
 					ck_free(new_buf);
-					goto retry_fa_splicing;
+					goto retry_gw_splicing;
 				}
 
 				/* Split somewhere between the first and last differing byte. */
@@ -6908,14 +6906,14 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 				out_buf = ck_alloc_nozero(len);
 				memcpy(out_buf, in_buf, len);
 
-				goto fa_havoc_stage_entry;
+				goto gw_havoc_stage_entry;
 
 			}
 #endif /* !IGNORE_FINDS */
 
 			ret_val = 0;
 
-		fa_abandon_entry:
+		gw_abandon_entry:
 
 			splicing_with = -1;
 
@@ -6935,18 +6933,18 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 			ck_free(out_buf);
 			ck_free(eff_map);
 
-			fa_total_testcase_num += fa_havoc_testcase_num;
+			gw_total_testcase_num += gw_havoc_testcase_num;
 
-			if (fa_havoc_testcase_num != 0) {
-				queue_cur->firefly_fitness[tmp_firefly] = (double)(total_firefly_found - total_firefly_found_bkup) / ((double)(fa_havoc_testcase_num) / 5000.0);
+			if (gw_havoc_testcase_num != 0) {
+				queue_cur->greywolf_fitness[tmp_greywolf] = (double)(total_greywolf_found - total_greywolf_found_bkup) / ((double)(gw_havoc_testcase_num) / 5000.0);
 			}
 
-			total_firefly_found_bkup = total_firefly_found;
+			total_greywolf_found_bkup = total_greywolf_found;
 			new_hit_cnt = queued_paths + unique_crashes;
 
 			for (i = 0; i < operator_num; i++) {
-				operator_firefly_cycle_bkup[i] = operator_firefly_cycle[i];
-				operator_firefly_find_bkup[i] = operator_firefly_find[i];
+				operator_greywolf_cycle_bkup[i] = operator_greywolf_cycle[i];
+				operator_greywolf_find_bkup[i] = operator_greywolf_find[i];
 			}
 
 
@@ -8646,181 +8644,255 @@ abandon_entry:
 }
 
 
-static u8 best_firefly_fuzz(char** argv) {
-	double best_firefly_fitness;
+static u8 best_greywolf_fuzz(char** argv) {
+	double best_greywolf_fitness;
 	int key_val = 0;
-	int tmp_firefly;
+	int tmp_greywolf;
 	s32 i;
 
-	best_firefly_fitness = queue_cur->firefly_fitness[0];
-	tmp_firefly = 0;
+	best_greywolf_fitness = queue_cur->greywolf_fitness[0];
+	tmp_greywolf = 0;
 
-	for (i = 1; i < firefly_num; i++)
+	for (i = 1; i < greywolf_num; i++)
 	{
-		if (queue_cur->firefly_fitness[i] - best_firefly_fitness >= 0.00001) {
-			best_firefly_fitness = queue_cur->firefly_fitness[i];
-			tmp_firefly = i;
+		if (queue_cur->greywolf_fitness[i] - best_greywolf_fitness >= 0.00001) {
+			best_greywolf_fitness = queue_cur->greywolf_fitness[i];
+			tmp_greywolf = i;
 		}
 	}
 
 
-	local_best_firefly_mode = 1;
-	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv);
-	local_best_firefly_mode = 0;
+	local_best_greywolf_mode = 1;
+	key_val = gwo_havoc_fuzzing_one(tmp_greywolf, argv);
+	local_best_greywolf_mode = 0;
 	return key_val;
 }
 
+double alpha(int now_iter , int MaxIter)
+{
+  double alpha_value;
+  alpha_value = 2 * (1 - (double)now_iter / MaxIter);
+  return alpha_value;
+ 
+}
 
-double distance_between(int firefly_i, int firefly_j)
+void comand_vector(double* A_value, int now_iter, int MaxIter){
+  // double A_value[operator_num];
+  // 后期主函数定义
+  for(int cur_operator = 0; cur_operator < operator_num; cur_operator++){
+    A_value[cur_operator]= alpha(now_iter,MaxIter) * (2 * RAND_C - 1);
+  }
+}
+
+double distance_from_X(int greywolf_i, int greywolf_x, double* distance)
 {
 	int cur_operator;
-	double descartes_distance = 0.00;
+	
 	for (cur_operator = 0; cur_operator < operator_num; cur_operator++)
 	{
-		descartes_distance += pow(queue_cur->x_now[firefly_i][cur_operator] - queue_cur->x_now[firefly_j][cur_operator], 2);
+		distance[cur_operator]= ((RAND_C * queue_cur->x_now[greywolf_x][cur_operator] )- queue_cur->x_now[greywolf_i][cur_operator]);
 	}
-	return sqrt(descartes_distance);
 }
 
+void update_pos(int greywolf_i, int greywolf_alpha, int greywolf_beta, int greywolf_delta, int now_iter, int MaxIter)
+{ 
 
-double get_alpha_value()
-{
-	alpha_value = alpha_value * 0.99;
-	return alpha_value;
-}
-
-double get_beta_value(int firefly_i, int firefly_j)
-{
-	double beta_value;
-	beta_value = initial_beta * exp(-initial_gama * pow(distance_between(firefly_i, firefly_j), 2));
-	return beta_value;
-}
-
-void update_pos(int firefly_i, int firefly_j)
-{
 	int cur_operator;
-	double accumulated_x = 0.0;
+  double temp_position[operator_num];
+	double position_update_alpha[operator_num];
+  double position_update_beta[operator_num];
+  double position_update_delta[operator_num];
+  double accumulated_x = 0.0;
 
 	for (cur_operator = 0; cur_operator < operator_num; cur_operator++)
-	{
-		queue_cur->x_now[firefly_i][cur_operator] = queue_cur->x_now[firefly_i][cur_operator] + get_beta_value(firefly_i, firefly_j) * (queue_cur->x_now[firefly_j][cur_operator] - queue_cur->x_now[firefly_j][cur_operator]) + get_alpha_value() * (RAND_C - 0.5);
-		queue_cur->prob_now[firefly_i][cur_operator] = 0.0;
+	{ 
+    distance_from_X(greywolf_i, greywolf_alpha, distance);
+    comand_vector(A_value,now_iter,MaxIter);
+    temp_position[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_alpha][cur_operator] - A_value[cur_operator] * distance[cur_operator];
+    position_update_alpha[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = temp_position[cur_operator];
+		queue_cur->prob_now[greywolf_i][cur_operator] = 0.0;
 
-		if (queue_cur->x_now[firefly_i][cur_operator] > x_max)
-			queue_cur->x_now[firefly_i][cur_operator] = x_max;
-		else if (queue_cur->x_now[firefly_i][cur_operator] < x_min)
-			queue_cur->x_now[firefly_i][cur_operator] = x_min;
-		accumulated_x += queue_cur->x_now[firefly_i][cur_operator];
+		if (position_update_alpha[cur_operator] > x_max)
+			position_update_alpha[cur_operator] = x_max;
+		else if (position_update_alpha[cur_operator] < x_min)
+			position_update_alpha[cur_operator] = x_min;
 	}
 
 	for (cur_operator = 0; cur_operator < operator_num; cur_operator++)
+	{ 
+    distance_from_X(greywolf_i, greywolf_beta, distance);
+    comand_vector(A_value,now_iter,MaxIter);
+    temp_position[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_alpha][cur_operator] - A_value[cur_operator] * distance[cur_operator];
+    position_update_beta[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = temp_position[cur_operator];
+
+		if (position_update_beta[cur_operator] > x_max)
+			position_update_beta[cur_operator] = x_max;
+		else if (position_update_beta[cur_operator] < x_min)
+			position_update_beta[cur_operator] = x_min;
+	}
+
+	for (cur_operator = 0; cur_operator < operator_num; cur_operator++)
+	{ 
+    distance_from_X(greywolf_i, greywolf_delta, distance);
+    comand_vector(A_value,now_iter,MaxIter);
+    temp_position[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_alpha][cur_operator] - A_value[cur_operator] * distance[cur_operator];
+    position_update_delta[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+    queue_cur->x_now[greywolf_i][cur_operator] = temp_position[cur_operator];
+
+		if (position_update_delta[cur_operator] > x_max)
+			position_update_delta[cur_operator] = x_max;
+		else if (position_update_delta[cur_operator] < x_min)
+			position_update_delta[cur_operator] = x_min;
+	}
+
+  for (cur_operator = 0; cur_operator < operator_num; cur_operator++){
+    queue_cur->x_now[greywolf_i][cur_operator] = (position_update_alpha[cur_operator] + position_update_beta[cur_operator] + position_update_delta[cur_operator]) / 3.0;
+
+		if (queue_cur->x_now[greywolf_i][cur_operator] > x_max)
+			queue_cur->x_now[greywolf_i][cur_operator] = x_max;
+		else if (queue_cur->x_now[greywolf_i][cur_operator] < x_min)
+			queue_cur->x_now[greywolf_i][cur_operator] = x_min;
+		accumulated_x += queue_cur->x_now[greywolf_i][cur_operator];
+  }
+
+	for (cur_operator = 0; cur_operator < operator_num; cur_operator++)
 	{
-		queue_cur->x_now[firefly_i][cur_operator] = queue_cur->x_now[firefly_i][cur_operator] / accumulated_x;
+		queue_cur->x_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_i][cur_operator] / accumulated_x;
 		if (likely(cur_operator != 0))
-			queue_cur->prob_now[firefly_i][cur_operator] = queue_cur->prob_now[firefly_i][cur_operator - 1] + queue_cur->x_now[firefly_i][cur_operator];
+			queue_cur->prob_now[greywolf_i][cur_operator] = queue_cur->prob_now[greywolf_i][cur_operator - 1] + queue_cur->x_now[greywolf_i][cur_operator];
 		else
-			queue_cur->prob_now[firefly_i][cur_operator] = queue_cur->x_now[firefly_i][cur_operator];
+			queue_cur->prob_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
 	}
 
-	if (queue_cur->prob_now[firefly_i][operator_num - 1] < 0.99 || queue_cur->prob_now[firefly_i][operator_num - 1] > 1.01)
+	if (queue_cur->prob_now[greywolf_i][operator_num - 1] < 0.99 || queue_cur->prob_now[greywolf_i][operator_num - 1] > 1.01)
 		FATAL("ERROR probability");
 
 }
 
 
-static u8 calc_fitness(int tmp_firefly, char** argv)
+static u8 calc_fitness(int tmp_greywolf, char** argv)
 {
 	int key_val;
 
-	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv);
+	key_val = gwo_havoc_fuzzing_one(tmp_greywolf, argv);
 
-	return queue_cur->firefly_fitness[tmp_firefly];
+	return queue_cur->greywolf_fitness[tmp_greywolf];
 }
 
 
-static u8 fa_updating(char** argv) {
-
-	int firefly_i, firefly_j, fitness_i, fitness_j, end_tag;
+static u8 greywolf_updating(char** argv) {
+  int position_need_change = 0;
+	int greywolf_i, greywolf_j, fitness_i, fitness_j, end_tag;
 	u32 tmp_round = 0;
 	u32 last_update_round = 0;
-
+  double temp_x_now[operator_num];  
+  double temp_prob_now[operator_num];
+  double temp_fitness;
 	while (tmp_round < ROUND_MAX)
 	{
-		if (last_update_round == 0 && tmp_round == 1)
-			break;
-		for (firefly_i = 0; firefly_i < firefly_num; firefly_i++)
+		// if (last_update_round == 0 && tmp_round == 1)
+		// 	break;
+    position_need_change = 0;
+    for (greywolf_i = 0; greywolf_i < greywolf_num; greywolf_i++)
+    {
+      queue_cur->greywolf_fitness[greywolf_i] = calc_fitness(greywolf_i, argv);
+    }
+
+		for (greywolf_i = 0; greywolf_i < greywolf_num; greywolf_i++)
 		{
-			end_tag = 0;
-			fitness_i = calc_fitness(firefly_i, argv);
-			for (firefly_j = 0; firefly_j < firefly_num; firefly_j++)
+			for (greywolf_j = 0; greywolf_j < greywolf_num; greywolf_j++)
 			{ 
-        if (firefly_i == firefly_j) continue;
-				fitness_j = calc_fitness(firefly_j, argv);
+        if (greywolf_i == greywolf_j) continue;
 
-				if (fitness_i < fitness_j) {
+				if (queue_cur->greywolf_fitness[greywolf_i] < queue_cur->greywolf_fitness[greywolf_j]) {
 					last_update_round = tmp_round;
-					end_tag = 1;
-					update_pos(firefly_i, firefly_j);
-					fitness_i = calc_fitness(firefly_i, argv);
-				}
-			}
-
-			if (end_tag == 0) {
-				break;
+          position_need_change = 1;
+          for (int cur_operator = 0; cur_operator < operator_num; cur_operator++) {
+            temp_x_now[cur_operator] = queue_cur->x_now[greywolf_i][cur_operator];
+            queue_cur->x_now[greywolf_i][cur_operator] = queue_cur->x_now[greywolf_j][cur_operator];
+            queue_cur->x_now[greywolf_j][cur_operator] = temp_x_now[cur_operator];
+          
+            temp_prob_now[cur_operator] = queue_cur->prob_now[greywolf_i][cur_operator];
+            queue_cur->prob_now[greywolf_i][cur_operator] = queue_cur->prob_now[greywolf_j][cur_operator];
+            queue_cur->prob_now[greywolf_j][cur_operator] = temp_prob_now[cur_operator];
+          }
+          temp_fitness = queue_cur->greywolf_fitness[greywolf_i];
+          queue_cur->greywolf_fitness[greywolf_i] = queue_cur->greywolf_fitness[greywolf_j];
+          queue_cur->greywolf_fitness[greywolf_j] = temp_fitness;
+        }
 			}
 		}
+    if(position_need_change){
+      for(greywolf_i = 0; greywolf_i < greywolf_num; greywolf_i++)
+        {update_pos(greywolf_i, 0, 1, 2, tmp_round, ROUND_MAX);}
+    } 
 		tmp_round++;
 	}
 
 	//update_convergency_file(last_update_round);
 
-	if (last_update_round != ROUND_MAX) queue_cur->find_best_firefly = 1;
-	else queue_cur->find_best_firefly = 0;
+	if (last_update_round != ROUND_MAX) queue_cur->find_best_greywolf = 1;
+	else queue_cur->find_best_greywolf = 0;
 
 
 	return 1;
 
 }
 
+// 混沌映射函数
+double logistic_map(double x0, int iter) {
+  double r = 3.99; // 控制参数，混沌区间为 (3.57, 4.0]
+  double x = x0;
+  for (int i = 0; i < iter; i++) {
+    x = r * x * (1.0 - x);
+  }
+  return x;
+}
 
-
-void fa_initial()
+void greywolf_initial()
 {
 	int i;
-	int tmp_firefly;
+	int tmp_greywolf;
 
-	for (tmp_firefly = 0; tmp_firefly < firefly_num; tmp_firefly++)
+	for (tmp_greywolf = 0; tmp_greywolf < greywolf_num; tmp_greywolf++)
 	{
 		double total_x_now = 0.0;
-		queue_cur->firefly_fitness[tmp_firefly] = 0.0;
+		queue_cur->greywolf_fitness[tmp_greywolf] = 0.0;
+
+    double chaos_seed = (double)(random() % 10000) / 10000.0;  // 初始种子 ∈ (0,1)
 
 		for (i = 0; i < operator_num; i++)
 		{
-			queue_cur->prob_now[tmp_firefly][i] = 0.0;
-			queue_cur->x_now[tmp_firefly][i] = ((double)(random() % 7000) * 0.0001 + 0.1);
+			chaos_seed = logistic_map(chaos_seed, 5); 
+      queue_cur->x_now[tmp_greywolf][i] = x_min + chaos_seed * (x_max - x_min);
 
-			if (queue_cur->x_now[tmp_firefly][i] > x_max)
-				queue_cur->x_now[tmp_firefly][i] = x_max;
-			else if (queue_cur->x_now[tmp_firefly][i] < x_min)
-				queue_cur->x_now[tmp_firefly][i] = x_min;
+			if (queue_cur->x_now[tmp_greywolf][i] > x_max)
+				queue_cur->x_now[tmp_greywolf][i] = x_max;
+			else if (queue_cur->x_now[tmp_greywolf][i] < x_min)
+				queue_cur->x_now[tmp_greywolf][i] = x_min;
 
-			total_x_now += queue_cur->x_now[tmp_firefly][i];
+			total_x_now += queue_cur->x_now[tmp_greywolf][i];
 		}
 
 		for (i = 0; i < operator_num; i++) {
-			queue_cur->x_now[tmp_firefly][i] = queue_cur->x_now[tmp_firefly][i] / total_x_now;
+			queue_cur->x_now[tmp_greywolf][i] = queue_cur->x_now[tmp_greywolf][i] / total_x_now;
 			if (likely(i != 0))
-				queue_cur->prob_now[tmp_firefly][i] = queue_cur->prob_now[tmp_firefly][i - 1] + queue_cur->x_now[tmp_firefly][i];
+				queue_cur->prob_now[tmp_greywolf][i] = queue_cur->prob_now[tmp_greywolf][i - 1] + queue_cur->x_now[tmp_greywolf][i];
 			else
-				queue_cur->prob_now[tmp_firefly][i] = queue_cur->x_now[tmp_firefly][i];
+				queue_cur->prob_now[tmp_greywolf][i] = queue_cur->x_now[tmp_greywolf][i];
 
 		}
 	}
 
-	if (queue_cur->prob_now[firefly_num - 1][operator_num - 1] < 0.99 || queue_cur->prob_now[firefly_num - 1][operator_num - 1] > 1.01)
+	if (queue_cur->prob_now[greywolf_num - 1][operator_num - 1] < 0.99 || queue_cur->prob_now[greywolf_num - 1][operator_num - 1] > 1.01)
 		FATAL("ERROR probability");
 
-	queue_cur->find_best_firefly = 0;
+	queue_cur->find_best_greywolf = 0;
 }
 
 
@@ -8833,16 +8905,16 @@ static u8 fuzz_one(char** argv) {
 	else
 	{
 		if (queue_cur->was_fuzzed) {
-			if (queue_cur->find_best_firefly)
-				key_val_lv = best_firefly_fuzz(argv);
+			if (queue_cur->find_best_greywolf)
+				key_val_lv = best_greywolf_fuzz(argv);
 			else 
-				key_val_lv = fa_updating(argv);
-			  key_val_lv = best_firefly_fuzz(argv);
+				key_val_lv = greywolf_updating(argv);
+			  key_val_lv = best_greywolf_fuzz(argv);
 		}
 
 		else {
-			fa_initial();
-			fa_updating(argv);
+			greywolf_initial();
+			greywolf_updating(argv);
 		}
 	}
 
@@ -10139,17 +10211,17 @@ int main(int argc, char** argv) {
 
         break;
 	 
-	  case 'A': { /* FA mode */
+	  case 'A': { /* GWO mode */
 
 		  fuzzing_mode = 1;
 		  //use_splicing = 1;
 		  int i;
 		  for (i = 0; i < operator_num; i++)
 		  {
-			  operator_firefly_cycle[i] = 0;
-			  operator_firefly_cycle_bkup[i] = 0;
-			  operator_firefly_find[i] = 0;
-			  operator_firefly_find_bkup[i] = 0;
+			  operator_greywolf_cycle[i] = 0;
+			  operator_greywolf_cycle_bkup[i] = 0;
+			  operator_greywolf_find[i] = 0;
+			  operator_greywolf_find_bkup[i] = 0;
 		  }
 	   }
 	   break;
